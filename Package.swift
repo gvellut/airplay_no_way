@@ -9,7 +9,9 @@ let package = Package(
         .executableTarget(
             name: "AudioMonitorHelper",
             linkerSettings: [
-                .linkedFramework("CoreAudio")
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("AppKit")
             ]
         ),
         // The main application is also a normal executable.

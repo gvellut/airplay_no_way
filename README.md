@@ -4,9 +4,14 @@
 
 ## Purpose
 
-- Monitors system audio device changes.
-- Automatically reverts audio output to the previous device when AirPlay connects.
+- Monitors system audio output and display connections.
+- Preserves the current audio output (including Bluetooth or MacBook speakers) when an Apple TV display connects through AirPlay.
+- Allows switching to the TV speakers manually afterward through the macOS Sound menu.
 - Includes a launcher and a helper for background monitoring.
+
+When a new external display connects, the helper watches for an AirPlay audio switch during a five-second setup window and restores the previous output once. After that restoration, or after the window expires, it leaves audio selections alone until another display connects. It also handles an audio switch reported up to five seconds before the display connection notification. Disconnecting the new display clears any remaining protection for that connection. Existing output selections are preserved when the helper starts.
+
+This is a timing heuristic because macOS does not identify manual versus automatic output changes. A manual selection during the setup window may be reverted once; selecting the TV again will then be allowed. A delayed automatic switch outside the window may be allowed. Audio-only AirPlay selections without a display connection are left alone. The helper only restores AirPlay output changes; other output types are unaffected.
 
 ## Build
 
