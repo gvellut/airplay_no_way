@@ -13,6 +13,16 @@ When a new external display connects, the helper watches for an AirPlay audio sw
 
 This is a timing heuristic because macOS does not identify manual versus automatic output changes. A manual selection during the setup window may be reverted once; selecting the TV again will then be allowed. A delayed automatic switch outside the window may be allowed. Audio-only AirPlay selections without a display connection are left alone. The helper only restores AirPlay output changes; other output types are unaffected.
 
+## Adjust the setup window
+
+Change this constant in [Sources/AudioMonitorHelper/main.swift](Sources/AudioMonitorHelper/main.swift):
+
+```swift
+static let setupWindow: TimeInterval = 5
+```
+
+The value is in seconds and controls both windows: before and after detecting a new external display. Larger values accommodate slower connections but increase the time during which a manual AirPlay selection may be reverted once. Rebuild and reinstall the app, then restart its background helper for the change to take effect.
+
 ## Build
 
 Prerequisites:
