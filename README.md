@@ -13,15 +13,20 @@ When a new external display connects, the helper watches for an AirPlay audio sw
 
 This is a timing heuristic because macOS does not identify manual versus automatic output changes. A manual selection during the setup window may be reverted once; selecting the TV again will then be allowed. A delayed automatic switch outside the window may be allowed. Audio-only AirPlay selections without a display connection are left alone. The helper only restores AirPlay output changes; other output types are unaffected.
 
-## Adjust the setup window
+## Configure audio switching
 
-Change this constant in [Sources/AudioMonitorHelper/main.swift](Sources/AudioMonitorHelper/main.swift):
+Change these constants in [Sources/AudioMonitorHelper/main.swift](Sources/AudioMonitorHelper/main.swift) before building:
 
 ```swift
+static let connectionAwareBehaviorEnabled: Bool = true
 static let setupWindow: TimeInterval = 5
 ```
 
-The value is in seconds and controls both windows: before and after detecting a new external display. Larger values accommodate slower connections but increase the time during which a manual AirPlay selection may be reverted once. Rebuild and reinstall the app, then restart its background helper for the change to take effect.
+`connectionAwareBehaviorEnabled` defaults to `true`, enabling the connection setup window and allowing manual AirPlay selections afterward. Set it to `false` to restore the original behavior: every AirPlay selection, including manual selections, is reverted to the last non-AirPlay output. In that mode, display monitoring and the setup window are disabled; if the helper starts with AirPlay selected, it falls back to an available Bluetooth output, then built-in speakers.
+
+`setupWindow` is in seconds and controls both windows: before and after detecting a new external display. Larger values accommodate slower connections but increase the time during which a manual AirPlay selection may be reverted once. It is used only when `connectionAwareBehaviorEnabled` is `true`.
+
+Rebuild and reinstall the app, then restart its background helper for changes to take effect.
 
 ## Build
 

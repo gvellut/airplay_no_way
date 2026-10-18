@@ -19,6 +19,8 @@ struct AudioMonitorHelper {
 
 private final class AudioMonitor {
     static let logger = Logger(subsystem: "com.user.audiomonitor", category: "AudioService")
+    // Set to false before building to restore the original always-revert policy.
+    static let connectionAwareBehaviorEnabled: Bool = true
     static let setupWindow: TimeInterval = 5
 
     private struct OutputDevice {
@@ -41,7 +43,8 @@ private final class AudioMonitor {
 
     // All mutable state is accessed on the main event queue.
     private var currentOutput: OutputDevice
-    private var externalDisplays: Set<CGDirectDisplayID>
+    private var legacyPreferredOutput: OutputDevice?
+    private var externalDisplays = Set<CGDirectDisplayID>()
     private var setupProtection: SetupProtection?
     private var recentAirPlayChange: RecentAirPlayChange?
     private var outputListener: AudioObjectPropertyListenerBlock?
@@ -49,16 +52,34 @@ private final class AudioMonitor {
 
     init?() {
         Self.logger.info("AudioMonitorHelper service starting up.")
-        guard let output = Self.getDefaultOutputDevice(),
-            let displays = Self.getExternalDisplays()
-        else {
-            Self.logger.error("Could not read the initial audio and display configuration. Exiting.")
+        let initialOutput = Self.getDefaultOutputDevice()
+        var preferredOutput: OutputDevice?
+        if !Self.connectionAwareBehaviorEnabled {
+            if let output = initialOutput, !output.isAirPlay {
+                preferredOutput = output
+            } else {
+                preferredOutput = Self.findLegacyFallbackOutput()
+            }
+            guard preferredOutput != nil else {
+                Self.logger.error("Could not establish a non-AirPlay output. Exiting.")
+                return nil
+            }
+        }
+        guard let output = initialOutput ?? preferredOutput else {
+            Self.logger.error("Could not read the initial audio output. Exiting.")
             return nil
         }
 
-        // Preserve existing choices, including AirPlay selected before the helper starts.
         currentOutput = output
-        externalDisplays = displays
+        legacyPreferredOutput = preferredOutput
+        if Self.connectionAwareBehaviorEnabled {
+            guard let displays = Self.getExternalDisplays() else {
+                Self.logger.error("Could not read the initial display configuration. Exiting.")
+                return nil
+            }
+            // Preserve existing choices, including AirPlay selected before the helper starts.
+            externalDisplays = displays
+        }
         Self.logger.info("Current audio output: '\(output.name)'")
     }
 
@@ -75,19 +96,23 @@ private final class AudioMonitor {
         }
         outputListener = listener
 
-        let displayStatus = CGDisplayRegisterReconfigurationCallback(
-            Self.displayCallback, Unmanaged.passUnretained(self).toOpaque())
-        guard displayStatus == .success else {
-            Self.logger.error("Failed to register display listener. Status: \(displayStatus.rawValue).")
-            stop()
-            return false
+        if Self.connectionAwareBehaviorEnabled {
+            let displayStatus = CGDisplayRegisterReconfigurationCallback(
+                Self.displayCallback, Unmanaged.passUnretained(self).toOpaque())
+            guard displayStatus == .success else {
+                Self.logger.error("Failed to register display listener. Status: \(displayStatus.rawValue).")
+                stop()
+                return false
+            }
+            displayListenerRegistered = true
+            handleDisplayChange()
+            Self.logger.info("Monitoring audio output and display connections...")
+        } else {
+            Self.logger.info("Connection-aware behavior disabled. Reverting every AirPlay selection.")
         }
-        displayListenerRegistered = true
 
         // Catch changes between the initial snapshot and listener registration.
-        handleDisplayChange()
         handleOutputChange()
-        Self.logger.info("Monitoring audio output and display connections...")
         return true
     }
 
@@ -115,7 +140,9 @@ private final class AudioMonitor {
     }
 
     private func handleDisplayChange() {
-        guard let displays = Self.getExternalDisplays() else { return }
+        guard Self.connectionAwareBehaviorEnabled, let displays = Self.getExternalDisplays() else {
+            return
+        }
         let added = displays.subtracting(externalDisplays)
         let removed = externalDisplays.subtracting(displays)
         externalDisplays = displays
@@ -148,6 +175,10 @@ private final class AudioMonitor {
     }
 
     private func handleOutputChange() {
+        guard Self.connectionAwareBehaviorEnabled else {
+            handleLegacyOutputChange()
+            return
+        }
         let now = ProcessInfo.processInfo.systemUptime
         if let protection = setupProtection, now > protection.deadline {
             setupProtection = nil
@@ -172,6 +203,19 @@ private final class AudioMonitor {
         }
     }
 
+    private func handleLegacyOutputChange() {
+        guard let output = Self.getDefaultOutputDevice() else { return }
+        currentOutput = output
+        if output.isAirPlay {
+            if let preferredOutput = legacyPreferredOutput {
+                restoreOutput(to: preferredOutput)
+            }
+        } else if legacyPreferredOutput?.id != output.id {
+            legacyPreferredOutput = output
+            Self.logger.info("Preferred non-AirPlay output changed to: '\(output.name)'")
+        }
+    }
+
     @discardableResult
     private func restoreOutputDuringSetup() -> Bool {
         guard let protection = setupProtection,
@@ -184,13 +228,48 @@ private final class AudioMonitor {
         // including notifications generated by this restoration. A reconnect arms it again.
         setupProtection = nil
         recentAirPlayChange = nil
-        let status = Self.setDefaultOutputDevice(deviceID: protection.output.id)
+        restoreOutput(to: protection.output)
+        return true
+    }
+
+    private func restoreOutput(to output: OutputDevice) {
+        let status = Self.setDefaultOutputDevice(deviceID: output.id)
         if status == noErr {
-            Self.logger.notice("Requested restoration of audio output to: '\(protection.output.name)'")
+            Self.logger.notice("Requested restoration of audio output to: '\(output.name)'")
         } else {
             Self.logger.error("Failed to restore audio output. Status: \(status).")
         }
-        return true
+    }
+
+    private static func findLegacyFallbackOutput() -> OutputDevice? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        guard AudioObjectGetPropertyDataSize(system, &address, 0, nil, &size) == noErr,
+            size > 0
+        else { return nil }
+        var devices = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(system, &address, 0, nil, &size, &devices) == noErr else {
+            return nil
+        }
+
+        // Match the original preference order, accepting only devices with output streams.
+        for transport in ["blue", "bltn"] {
+            for deviceID in devices where getDeviceTransportType(deviceID: deviceID) == transport {
+                var streamsAddress = AudioObjectPropertyAddress(
+                    mSelector: kAudioDevicePropertyStreams,
+                    mScope: kAudioObjectPropertyScopeOutput, mElement: kAudioObjectPropertyElementMain)
+                var streamsSize: UInt32 = 0
+                guard AudioObjectGetPropertyDataSize(
+                    deviceID, &streamsAddress, 0, nil, &streamsSize) == noErr, streamsSize > 0
+                else { continue }
+                return OutputDevice(
+                    id: deviceID, name: getDeviceName(deviceID: deviceID) ?? "Unknown", isAirPlay: false)
+            }
+        }
+        return nil
     }
 
     private static func getExternalDisplays() -> Set<CGDirectDisplayID>? {
